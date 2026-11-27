@@ -1,0 +1,1442 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Sabor Norteñito POS — Sistema Integral v3.0</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <link rel="manifest" id="dynamic-manifest" />
+  <style>
+    * { -webkit-tap-highlight-color: transparent; }
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    @media print {
+      body * { visibility: hidden; }
+      #print-ticket-area, #print-ticket-area * { visibility: visible; }
+      #print-ticket-area {
+        position: fixed; left: 0; top: 0; width: 80mm; padding: 4mm;
+        background: #fff; color: #000; font-family: monospace; font-size: 12px;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen select-none">
+
+  <div id="app"></div>
+  <div id="print-ticket-area" class="hidden"></div>
+
+  <script>
+    (function setupPWA() {
+      const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="96" fill="#ea580c"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" font-size="250" font-family="sans-serif" font-weight="bold" fill="#ffffff">SN</text></svg>`;
+      const iconUrl = "data:image/svg+xml;base64," + btoa(iconSvg);
+      const manifest = {
+        name: "Sabor Norteñito POS",
+        short_name: "SaborNorteñito",
+        start_url: "./",
+        display: "standalone",
+        background_color: "#0f172a",
+        theme_color: "#ea580c",
+        icons: [{ src: iconUrl, sizes: "512x512", type: "image/svg+xml" }]
+      };
+      const blob = new Blob([JSON.stringify(manifest)], { type: "application/json" });
+      document.getElementById("dynamic-manifest").setAttribute("href", URL.createObjectURL(blob));
+    })();
+
+    const STORAGE_KEY = "sabor_nortenito_pos_v3";
+    const channel = ("BroadcastChannel" in window) ? new BroadcastChannel("sn_pos_sync_v3") : null;
+    let supabaseClient = null;
+    let supabaseChannel = null;
+
+    const DEFAULT_STATE = {
+      businessName: "SABOR NORTEÑITO",
+      shiftActive: true,
+      shiftLastChanged: new Date().toLocaleString("es-PE"),
+      yapeNumber: "987 654 321",
+      plinNumber: "987 654 321",
+      cloudConfig: {
+        enabled: false,
+        url: "",
+        anonKey: "",
+        roomId: "sabor-nortenito-principal",
+        lastSync: ""
+      },
+      users: [
+        { id: "u1", name: "Kevin (Admin)", role: "admin", pin: "1111", active: true },
+        { id: "u2", name: "Carlos (Mesero 1)", role: "mesero", pin: "2222", active: true },
+        { id: "u3", name: "Lucía (Mesera 2)", role: "mesero", pin: "3333", active: true },
+        { id: "u4", name: "Cocina Principal", role: "cocina", pin: "4444", active: true },
+        { id: "u5", name: "Caja Principal", role: "caja", pin: "5555", active: true }
+      ],
+      tables: [
+        { id: "m1", name: "Mesa 1", zone: "Salón", status: "libre" },
+        { id: "m2", name: "Mesa 2", zone: "Salón", status: "libre" },
+        { id: "m3", name: "Mesa 3", zone: "Salón", status: "libre" },
+        { id: "m4", name: "Mesa 4", zone: "Salón", status: "libre" },
+        { id: "m5", name: "Mesa 5", zone: "Terraza", status: "libre" },
+        { id: "m6", name: "Mesa 6", zone: "Terraza", status: "libre" },
+        { id: "m7", name: "Barra 1", zone: "Barra", status: "libre" },
+        { id: "m8", name: "Para Llevar 1", zone: "Delivery / Llevar", status: "libre" }
+      ],
+      menu: [
+        { id: "p1", name: "Ceviche Norteño Mixto", category: "Marinos y Entradas", price: 25.00, available: true },
+        { id: "p2", name: "Cabrito a la Norteña con Frejoles", category: "Platos de Fondo", price: 28.00, available: true },
+        { id: "p3", name: "Arroz con Pato a la Chiclayana", category: "Platos de Fondo", price: 26.00, available: true },
+        { id: "p4", name: "Sudado de Pescado Norteño", category: "Platos de Fondo", price: 24.00, available: true },
+        { id: "p5", name: "Lomo Saltado Clásico", category: "Platos de Fondo", price: 24.00, available: true },
+        { id: "p6", name: "Tequeños con Guacamole (6 und)", category: "Piqueos y Entradas", price: 12.00, available: true },
+        { id: "p7", name: "Chicha de Jora / Morada Jarra 1L", category: "Bebidas", price: 10.00, available: true },
+        { id: "p8", name: "Inca Kola 500ml", category: "Bebidas", price: 4.50, available: true }
+      ],
+      activeOrders: {},
+      kitchenTickets: [],
+      salesHistory: [],
+      cashRegister: {
+        isOpen: true,
+        openedAt: new Date().toLocaleString("es-PE"),
+        openedBy: "Kevin (Admin)",
+        openingCash: 150.00,
+        expenses: []
+      },
+      cashClosures: [],
+      auditLogs: [
+        { id: "log1", time: new Date().toLocaleTimeString("es-PE"), date: new Date().toLocaleDateString("es-PE"), user: "Sistema", action: "Sistema Sabor Norteñito POS v3.0 inicializado." }
+      ]
+    };
+
+    function loadState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return JSON.parse(JSON.stringify(DEFAULT_STATE));
+        const parsed = JSON.parse(raw);
+        return {
+          ...JSON.parse(JSON.stringify(DEFAULT_STATE)),
+          ...parsed,
+          cloudConfig: { ...DEFAULT_STATE.cloudConfig, ...(parsed.cloudConfig || {}) }
+        };
+      } catch (e) {
+        return JSON.parse(JSON.stringify(DEFAULT_STATE));
+      }
+    }
+
+    let state = loadState();
+    let currentUser = null;
+    let activeTab = "mesas";
+    let selectedTableId = null;
+    let menuCategoryFilter = "Todos";
+    let menuSearchQuery = "";
+    let checkoutModal = null;
+    let pinBuffer = "";
+    let loginError = "";
+
+    function saveState(skipBroadcast = false, skipCloud = false) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      if (!skipBroadcast && channel) {
+        channel.postMessage({ type: "SYNC_STATE", state });
+      }
+      if (!skipCloud && state.cloudConfig && state.cloudConfig.enabled) {
+        pushStateToSupabase();
+      }
+    }
+
+    async function connectSupabaseRealtime() {
+      if (!state.cloudConfig || !state.cloudConfig.enabled || !state.cloudConfig.url || !state.cloudConfig.anonKey) return;
+      try {
+        if (!window.supabase) return;
+        supabaseClient = window.supabase.createClient(state.cloudConfig.url.trim(), state.cloudConfig.anonKey.trim());
+        await pullStateFromSupabase();
+
+        if (supabaseChannel) {
+          await supabaseClient.removeChannel(supabaseChannel);
+        }
+        const room = (state.cloudConfig.roomId || "sabor-nortenito-principal").trim();
+        supabaseChannel = supabaseClient
+          .channel("pos-room-" + room)
+          .on(
+            "postgres_changes",
+            { event: "*", schema: "public", table: "pos_sync_state", filter: "id=eq." + room },
+            (payload) => {
+              if (payload.new && payload.new.payload_json) {
+                const remoteCloud = state.cloudConfig;
+                state = {
+                  ...JSON.parse(JSON.stringify(DEFAULT_STATE)),
+                  ...payload.new.payload_json,
+                  cloudConfig: { ...remoteCloud, lastSync: new Date().toLocaleTimeString("es-PE") }
+                };
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+                verifyCurrentUserAccess();
+                render();
+              }
+            }
+          )
+          .subscribe();
+      } catch (err) {
+        console.warn("Error conectando nube Supabase:", err);
+      }
+    }
+
+    async function pushStateToSupabase() {
+      if (!supabaseClient || !state.cloudConfig.enabled) return;
+      try {
+        const room = (state.cloudConfig.roomId || "sabor-nortenito-principal").trim();
+        const sanitized = { ...state, cloudConfig: { ...state.cloudConfig, anonKey: state.cloudConfig.anonKey } };
+        await supabaseClient
+          .from("pos_sync_state")
+          .upsert({ id: room, payload_json: sanitized, updated_at: new Date().toISOString() }, { onConflict: "id" });
+        state.cloudConfig.lastSync = new Date().toLocaleTimeString("es-PE");
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      } catch (err) {
+        console.warn("Error enviando a nube:", err);
+      }
+    }
+
+    async function pullStateFromSupabase() {
+      if (!supabaseClient || !state.cloudConfig.enabled) return;
+      try {
+        const room = (state.cloudConfig.roomId || "sabor-nortenito-principal").trim();
+        const { data, error } = await supabaseClient
+          .from("pos_sync_state")
+          .select("payload_json")
+          .eq("id", room)
+          .single();
+        if (!error && data && data.payload_json) {
+          const localCloud = state.cloudConfig;
+          state = {
+            ...JSON.parse(JSON.stringify(DEFAULT_STATE)),
+            ...data.payload_json,
+            cloudConfig: { ...localCloud, lastSync: new Date().toLocaleTimeString("es-PE") }
+          };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          verifyCurrentUserAccess();
+          render();
+        }
+      } catch (err) {
+        console.warn("Error leyendo desde nube:", err);
+      }
+    }
+
+    if (channel) {
+      channel.onmessage = (ev) => {
+        if (ev.data && ev.data.type === "SYNC_STATE") {
+          state = ev.data.state;
+          verifyCurrentUserAccess();
+          render();
+        }
+      };
+    }
+
+    window.addEventListener("storage", (e) => {
+      if (e.key === STORAGE_KEY) {
+        state = loadState();
+        verifyCurrentUserAccess();
+        render();
+      }
+    });
+
+    function addLog(action, customUser = null) {
+      const now = new Date();
+      state.auditLogs.unshift({
+        id: "log_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6),
+        time: now.toLocaleTimeString("es-PE"),
+        date: now.toLocaleDateString("es-PE"),
+        user: customUser || (currentUser ? currentUser.name : "Sistema"),
+        action
+      });
+      if (state.auditLogs.length > 400) state.auditLogs.pop();
+    }
+
+    function playBeep(freq = 880) {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.12, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.25);
+      } catch (e) {}
+    }
+
+    function verifyCurrentUserAccess() {
+      if (!currentUser) return;
+      const freshUser = state.users.find(u => u.id === currentUser.id);
+      if (!freshUser) {
+        alert("Tu cuenta ha sido eliminada del portal por el Administrador.");
+        currentUser = null;
+        return;
+      }
+      if (!freshUser.active) {
+        alert("Tu acceso al sistema ha sido desactivado por el Administrador.");
+        currentUser = null;
+        return;
+      }
+      if (freshUser.role !== "admin" && !state.shiftActive) {
+        alert("La jornada laboral ha sido cerrada por el Administrador. Acceso bloqueado hasta el próximo turno.");
+        currentUser = null;
+        return;
+      }
+      currentUser = freshUser;
+    }
+
+    function handlePinDigit(digit) {
+      if (pinBuffer.length < 4) {
+        pinBuffer += digit;
+        loginError = "";
+        if (pinBuffer.length === 4) {
+          attemptLogin(pinBuffer);
+        }
+        render();
+      }
+    }
+
+    function attemptLogin(pin) {
+      const user = state.users.find(u => u.pin === pin);
+      if (!user) {
+        loginError = "PIN incorrecto. Verifica tu código.";
+        pinBuffer = "";
+        return;
+      }
+      if (!user.active) {
+        loginError = "Usuario desactivado o dado de baja. Contacta al Administrador.";
+        pinBuffer = "";
+        return;
+      }
+      if (user.role !== "admin" && !state.shiftActive) {
+        loginError = "JORNADA CERRADA: El administrador cortó el acceso hasta el próximo turno.";
+        pinBuffer = "";
+        return;
+      }
+      currentUser = user;
+      pinBuffer = "";
+      loginError = "";
+      if (user.role === "admin") activeTab = "admin";
+      else if (user.role === "cocina") activeTab = "cocina";
+      else if (user.role === "caja") activeTab = "caja";
+      else activeTab = "mesas";
+      addLog("Inició sesión en el sistema (" + user.role.toUpperCase() + ")", user.name);
+      saveState();
+      render();
+    }
+
+    function logout() {
+      if (currentUser) {
+        addLog("Cerró sesión", currentUser.name);
+        saveState();
+      }
+      currentUser = null;
+      selectedTableId = null;
+      checkoutModal = null;
+      render();
+    }
+
+    function openTable(tableId) {
+      selectedTableId = tableId;
+      if (!state.activeOrders[tableId]) {
+        const tbl = state.tables.find(t => t.id === tableId);
+        state.activeOrders[tableId] = {
+          tableId,
+          tableName: tbl.name,
+          waiterName: currentUser.name,
+          startedAt: new Date().toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }),
+          items: []
+        };
+      }
+      render();
+    }
+
+    function addItemToOrder(productId) {
+      if (!selectedTableId) return;
+      const prod = state.menu.find(p => p.id === productId);
+      if (!prod || !prod.available) return;
+      const order = state.activeOrders[selectedTableId];
+      const existing = order.items.find(i => i.productId === productId && !i.sentToKitchen && (i.note || "") === "");
+      if (existing) {
+        existing.qty += 1;
+      } else {
+        order.items.push({
+          uid: "it_" + Date.now() + "_" + Math.random().toString(36).slice(2, 5),
+          productId: prod.id,
+          name: prod.name,
+          price: prod.price,
+          qty: 1,
+          note: "",
+          sentToKitchen: false
+        });
+      }
+      const tbl = state.tables.find(t => t.id === selectedTableId);
+      if (tbl.status === "libre") tbl.status = "ocupada";
+      saveState();
+      render();
+    }
+
+    function changeItemQty(itemUid, delta) {
+      const order = state.activeOrders[selectedTableId];
+      if (!order) return;
+      const idx = order.items.findIndex(i => i.uid === itemUid);
+      if (idx === -1) return;
+      if (order.items[idx].sentToKitchen && currentUser.role !== "admin") {
+        alert("Este plato ya fue enviado a cocina. Solo el Administrador puede descontarlo.");
+        return;
+      }
+      order.items[idx].qty += delta;
+      if (order.items[idx].qty <= 0) {
+        order.items.splice(idx, 1);
+      }
+      if (order.items.length === 0) {
+        const tbl = state.tables.find(t => t.id === selectedTableId);
+        tbl.status = "libre";
+        delete state.activeOrders[selectedTableId];
+        selectedTableId = null;
+      }
+      saveState();
+      render();
+    }
+
+    function setItemNote(itemUid) {
+      const order = state.activeOrders[selectedTableId];
+      if (!order) return;
+      const item = order.items.find(i => i.uid === itemUid);
+      if (!item) return;
+      const note = prompt(`Nota para cocina (${item.name}):`, item.note || "");
+      if (note !== null) {
+        item.note = note.trim();
+        saveState();
+        render();
+      }
+    }
+
+    function sendOrderToKitchen() {
+      const order = state.activeOrders[selectedTableId];
+      if (!order) return;
+      const pendingItems = order.items.filter(i => !i.sentToKitchen);
+      if (pendingItems.length === 0) {
+        alert("No hay ítems nuevos por enviar a cocina.");
+        return;
+      }
+      const ticket = {
+        id: "KDS-" + Math.floor(1000 + Math.random() * 9000),
+        tableId: order.tableId,
+        tableName: order.tableName,
+        waiterName: currentUser.name,
+        createdAt: new Date().toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }),
+        timestamp: Date.now(),
+        status: "pendiente",
+        items: pendingItems.map(i => ({ ...i }))
+      };
+      pendingItems.forEach(i => { i.sentToKitchen = true; });
+      const tbl = state.tables.find(t => t.id === selectedTableId);
+      tbl.status = "cocina";
+      state.kitchenTickets.unshift(ticket);
+      addLog(`Envió comanda ${ticket.id} (${order.tableName}) a cocina`);
+      playBeep(920);
+      saveState();
+      render();
+    }
+
+    function updateKitchenTicketStatus(ticketId, newStatus) {
+      const ticket = state.kitchenTickets.find(t => t.id === ticketId);
+      if (!ticket) return;
+      ticket.status = newStatus;
+      if (newStatus === "listo") {
+        ticket.readyAt = new Date().toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" });
+        const tbl = state.tables.find(t => t.id === ticket.tableId);
+        if (tbl && tbl.status !== "libre") tbl.status = "listo";
+        playBeep(1150);
+      } else if (newStatus === "entregado") {
+        ticket.deliveredAt = new Date().toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" });
+        const tbl = state.tables.find(t => t.id === ticket.tableId);
+        if (tbl && tbl.status !== "libre") tbl.status = "ocupada";
+      }
+      addLog(`Cocina marcó comanda ${ticket.id} (${ticket.tableName}) como ${newStatus.toUpperCase()}`);
+      saveState();
+      render();
+    }
+
+    function openCheckout(tableId) {
+      const order = state.activeOrders[tableId];
+      if (!order || order.items.length === 0) return;
+      const subtotal = order.items.reduce((acc, i) => acc + i.price * i.qty, 0);
+      checkoutModal = {
+        tableId,
+        method: "Yape",
+        receivedCash: subtotal.toFixed(2),
+        opCode: "",
+        discount: 0
+      };
+      render();
+    }
+
+    function processPayment() {
+      if (!checkoutModal) return;
+      const order = state.activeOrders[checkoutModal.tableId];
+      if (!order) return;
+      const subtotal = order.items.reduce((acc, i) => acc + i.price * i.qty, 0);
+      const discount = Math.max(0, Number(checkoutModal.discount) || 0);
+      const total = Math.max(0, subtotal - discount);
+      const received = Number(checkoutModal.receivedCash) || total;
+      const change = checkoutModal.method === "Efectivo" ? Math.max(0, received - total) : 0;
+
+      if (checkoutModal.method === "Efectivo" && received < total) {
+        alert("El monto recibido en efectivo es menor al total a cobrar.");
+        return;
+      }
+
+      const sale = {
+        id: "BOL-" + Date.now().toString().slice(-6),
+        date: new Date().toLocaleDateString("es-PE"),
+        time: new Date().toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }),
+        tableName: order.tableName,
+        waiterName: order.waiterName,
+        cashierName: currentUser.name,
+        method: checkoutModal.method,
+        opCode: checkoutModal.opCode.trim(),
+        items: order.items.map(i => ({ ...i })),
+        subtotal,
+        discount,
+        total,
+        received,
+        change,
+        status: "pagado"
+      };
+
+      state.salesHistory.unshift(sale);
+      delete state.activeOrders[checkoutModal.tableId];
+      const tbl = state.tables.find(t => t.id === checkoutModal.tableId);
+      if (tbl) tbl.status = "libre";
+      if (selectedTableId === checkoutModal.tableId) selectedTableId = null;
+
+      addLog(`Cobró ${sale.id} (${sale.tableName}) por S/ ${total.toFixed(2)} vía ${sale.method}`);
+      checkoutModal = null;
+      saveState();
+      render();
+      printSaleTicket(sale.id);
+    }
+
+    function printSaleTicket(saleId) {
+      const sale = state.salesHistory.find(s => s.id === saleId);
+      if (!sale) return;
+      const printArea = document.getElementById("print-ticket-area");
+      printArea.innerHTML = `
+        <div style="text-align:center; border-bottom:1px dashed #000; padding-bottom:6px; margin-bottom:6px;">
+          <strong style="font-size:15px;">${state.businessName}</strong><br/>
+          <span>Comprobante Interno: ${sale.id}</span><br/>
+          <span>${sale.date} ${sale.time} | ${sale.tableName}</span><br/>
+          <span>Atendido por: ${sale.waiterName}</span>
+        </div>
+        <div style="border-bottom:1px dashed #000; padding-bottom:6px; margin-bottom:6px;">
+          ${sale.items.map(i => `
+            <div style="display:flex; justify-content:space-between;">
+              <span>${i.qty}x ${i.name}</span>
+              <span>S/ ${(i.qty * i.price).toFixed(2)}</span>
+            </div>
+          `).join("")}
+        </div>
+        <div style="text-align:right;">
+          <div>Subtotal: S/ ${sale.subtotal.toFixed(2)}</div>
+          ${sale.discount > 0 ? `<div>Descuento: -S/ ${sale.discount.toFixed(2)}</div>` : ""}
+          <strong style="font-size:14px;">TOTAL: S/ ${sale.total.toFixed(2)}</strong><br/>
+          <div>Método: ${sale.method} ${sale.opCode ? `(Op: ${sale.opCode})` : ""}</div>
+          ${sale.method === "Efectivo" ? `<div>Recibido: S/ ${sale.received.toFixed(2)} | Vuelto: S/ ${sale.change.toFixed(2)}</div>` : ""}
+        </div>
+        <div style="text-align:center; margin-top:8px;">¡Gracias por preferir Sabor Norteñito!</div>
+      `;
+      printArea.classList.remove("hidden");
+      window.print();
+      printArea.classList.add("hidden");
+    }
+
+    function voidSale(saleId) {
+      if (currentUser.role !== "admin") return;
+      const sale = state.salesHistory.find(s => s.id === saleId);
+      if (!sale || sale.status === "anulado") return;
+      const reason = prompt(`Motivo para anular la boleta ${sale.id} (S/ ${sale.total.toFixed(2)}):`);
+      if (!reason || !reason.trim()) return;
+      sale.status = "anulado";
+      sale.voidReason = reason.trim();
+      addLog(`ANULÓ boleta ${sale.id} por S/ ${sale.total.toFixed(2)}. Motivo: ${reason.trim()}`);
+      saveState();
+      render();
+    }
+
+    function addCashExpense() {
+      const desc = prompt("Concepto del gasto de caja chica (ej. Hielo, Limones, Gas):");
+      if (!desc || !desc.trim()) return;
+      const amount = parseFloat(prompt("Monto gastado en Soles (ej. 15.50):"));
+      if (isNaN(amount) || amount <= 0) return;
+      state.cashRegister.expenses.unshift({
+        id: "exp_" + Date.now(),
+        time: new Date().toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit" }),
+        desc: desc.trim(),
+        amount,
+        user: currentUser.name
+      });
+      addLog(`Registró salida de caja: ${desc.trim()} (-S/ ${amount.toFixed(2)})`);
+      saveState();
+      render();
+    }
+
+    function closeCashShift() {
+      const validSales = state.salesHistory.filter(s => s.status === "pagado");
+      const totalYape = validSales.filter(s => s.method === "Yape").reduce((a, b) => a + b.total, 0);
+      const totalPlin = validSales.filter(s => s.method === "Plin").reduce((a, b) => a + b.total, 0);
+      const totalCash = validSales.filter(s => s.method === "Efectivo").reduce((a, b) => a + b.total, 0);
+      const totalCard = validSales.filter(s => s.method === "Tarjeta").reduce((a, b) => a + b.total, 0);
+      const totalExp = state.cashRegister.expenses.reduce((a, b) => a + b.amount, 0);
+      const expectedCash = state.cashRegister.openingCash + totalCash - totalExp;
+
+      const counted = parseFloat(prompt(`Arqueo de Efectivo.\nEfectivo esperado en caja: S/ ${expectedCash.toFixed(2)}\nIngresa el efectivo contado físico:`, expectedCash.toFixed(2)));
+      if (isNaN(counted)) return;
+
+      const closure = {
+        id: "CIE-" + Date.now().toString().slice(-5),
+        date: new Date().toLocaleString("es-PE"),
+        closedBy: currentUser.name,
+        totalYape,
+        totalPlin,
+        totalCard,
+        totalCash,
+        totalExp,
+        expectedCash,
+        countedCash: counted,
+        diff: counted - expectedCash
+      };
+      state.cashClosures.unshift(closure);
+      state.cashRegister.openingCash = counted;
+      state.cashRegister.expenses = [];
+      addLog(`Realizó cierre/arqueo de caja ${closure.id} (Diferencia: S/ ${closure.diff.toFixed(2)})`);
+      saveState();
+      render();
+    }
+
+    function toggleWorkShift() {
+      if (currentUser.role !== "admin") return;
+      const nextState = !state.shiftActive;
+      const msg = nextState
+        ? "¿Deseas ABRIR la jornada laboral de Sabor Norteñito? Todo el personal activo podrá volver a ingresar."
+        : "¿Deseas CORTAR / CERRAR la jornada laboral ahora? Se bloqueará el acceso inmediato a meseros, cocina y caja hasta que vuelvas a abrir turno.";
+      if (!confirm(msg)) return;
+      state.shiftActive = nextState;
+      state.shiftLastChanged = new Date().toLocaleString("es-PE");
+      addLog(nextState ? "ABRIÓ la jornada laboral del local" : "CORTÓ / DESACTIVÓ el acceso de jornada laboral");
+      saveState();
+      render();
+    }
+
+    function addStaffMember() {
+      const name = prompt("Nombre completo de la trabajadora o trabajador:");
+      if (!name || !name.trim()) return;
+      const role = prompt("Rol exacto (escribe: mesero, cocina, caja o admin):", "mesero");
+      if (!["mesero", "cocina", "caja", "admin"].includes((role || "").toLowerCase().trim())) {
+        alert("Rol inválido. Debe ser: mesero, cocina, caja o admin.");
+        return;
+      }
+      const pin = prompt("Asigna un PIN de 4 dígitos para su ingreso (ej. 6666):");
+      if (!pin || !/^\d{4}$/.test(pin.trim())) {
+        alert("El PIN debe tener exactamente 4 números.");
+        return;
+      }
+      if (state.users.some(u => u.pin === pin.trim())) {
+        alert("Ese PIN ya está siendo usado por otro trabajador.");
+        return;
+      }
+      state.users.push({
+        id: "u_" + Date.now(),
+        name: name.trim(),
+        role: role.toLowerCase().trim(),
+        pin: pin.trim(),
+        active: true
+      });
+      addLog(`Creó cuenta de personal: ${name.trim()} (${role.toUpperCase()})`);
+      saveState();
+      render();
+    }
+
+    function toggleStaffActive(userId) {
+      const u = state.users.find(x => x.id === userId);
+      if (!u || u.id === currentUser.id) return;
+      u.active = !u.active;
+      addLog(`${u.active ? "Reactivó" : "Suspendió"} acceso al portal de ${u.name}`);
+      saveState();
+      render();
+    }
+
+    function deleteStaffMember(userId) {
+      const u = state.users.find(x => x.id === userId);
+      if (!u || u.id === currentUser.id) return;
+      if (!confirm(`¿Eliminar definitivamente a "${u.name}" del portal (por renuncia o baja)?\nSe revocará su PIN y cerrará su acceso al instante.`)) return;
+      state.users = state.users.filter(x => x.id !== userId);
+      addLog(`ELIMINÓ DEFINITIVAMENTE del portal a ${u.name} (${u.role})`);
+      saveState();
+      render();
+    }
+
+    function addMenuProduct() {
+      const name = prompt("Nombre del plato o bebida:");
+      if (!name || !name.trim()) return;
+      const category = prompt("Categoría (ej. Platos de Fondo, Marinos y Entradas, Bebidas, Piqueos):", "Platos de Fondo");
+      const price = parseFloat(prompt("Precio en Soles (ej. 25.00):"));
+      if (isNaN(price) || price <= 0) return;
+      state.menu.push({
+        id: "p_" + Date.now(),
+        name: name.trim(),
+        category: (category || "General").trim(),
+        price,
+        available: true
+      });
+      addLog(`Agregó plato a la carta: ${name.trim()} (S/ ${price.toFixed(2)})`);
+      saveState();
+      render();
+    }
+
+    function toggleProductStock(prodId) {
+      const p = state.menu.find(x => x.id === prodId);
+      if (!p) return;
+      p.available = !p.available;
+      addLog(`${p.available ? "Activó" : "Agotó/Pausó"} plato: ${p.name}`);
+      saveState();
+      render();
+    }
+
+    function addNewTable() {
+      const name = prompt("Nombre de la nueva mesa (ej. Mesa 9, Terraza 3):");
+      if (!name || !name.trim()) return;
+      const zone = prompt("Zona (ej. Salón, Terraza, Barra, Delivery / Llevar):", "Salón");
+      state.tables.push({
+        id: "m_" + Date.now(),
+        name: name.trim(),
+        zone: (zone || "Salón").trim(),
+        status: "libre"
+      });
+      addLog(`Agregó ${name.trim()} en zona ${zone}`);
+      saveState();
+      render();
+    }
+
+    function saveCloudConfigFromUI() {
+      const urlInput = document.getElementById("sb-url-input");
+      const keyInput = document.getElementById("sb-key-input");
+      const roomInput = document.getElementById("sb-room-input");
+      const enabledInput = document.getElementById("sb-enabled-input");
+      if (!urlInput || !keyInput || !roomInput || !enabledInput) return;
+
+      state.cloudConfig.url = urlInput.value.trim();
+      state.cloudConfig.anonKey = keyInput.value.trim();
+      state.cloudConfig.roomId = (roomInput.value.trim() || "sabor-nortenito-principal");
+      state.cloudConfig.enabled = enabledInput.checked;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+
+      if (state.cloudConfig.enabled) {
+        connectSupabaseRealtime().then(() => {
+          pushStateToSupabase();
+          addLog("Activó sincronización en la nube entre dispositivos");
+          saveState(false, true);
+          render();
+        });
+      } else {
+        addLog("Desactivó sincronización en la nube");
+        saveState(false, true);
+        render();
+      }
+    }
+
+    function exportBackupJSON() {
+      const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `Respaldo_SaborNortenito_${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+    }
+
+    function exportSalesCSV() {
+      const rows = [["Boleta", "Fecha", "Hora", "Mesa", "Mesero", "Cajero", "Metodo", "Cod_Operacion", "Subtotal", "Descuento", "Total", "Estado"]];
+      state.salesHistory.forEach(s => {
+        rows.push([s.id, s.date, s.time, s.tableName, s.waiterName, s.cashierName, s.method, s.opCode || "-", s.subtotal.toFixed(2), s.discount.toFixed(2), s.total.toFixed(2), s.status]);
+      });
+      const csv = rows.map(r => r.join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `Historial_Ventas_SaborNortenito_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+    }
+
+    function render() {
+      const root = document.getElementById("app");
+      if (!currentUser) {
+        root.innerHTML = renderLoginScreen();
+        return;
+      }
+
+      const activeKitchenCount = state.kitchenTickets.filter(t => t.status === "pendiente" || t.status === "preparando").length;
+
+      root.innerHTML = `
+        <div class="min-h-screen flex flex-col md:flex-row pb-20 md:pb-0">
+          <aside class="hidden md:flex md:w-64 bg-slate-900 border-r border-slate-800 flex-col justify-between p-4 shrink-0">
+            <div>
+              <div class="flex items-center gap-3 pb-4 border-b border-slate-800">
+                <div class="w-10 h-10 rounded-xl bg-orange-600 flex items-center justify-center font-black text-white text-sm">SN</div>
+                <div>
+                  <h1 class="font-bold text-sm text-white leading-tight">${state.businessName}</h1>
+                  <span class="text-xs px-2 py-0.5 rounded-full ${state.shiftActive ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}">
+                    ${state.shiftActive ? "● Jornada Activa" : "● Jornada Cerrada"}
+                  </span>
+                </div>
+              </div>
+
+              <nav class="mt-4 space-y-1.5">
+                ${renderNavButtons(activeKitchenCount, false)}
+              </nav>
+            </div>
+
+            <div class="pt-4 border-t border-slate-800 space-y-2">
+              <div class="bg-slate-800/70 rounded-xl p-3">
+                <div class="text-xs text-slate-400">Sesión actual</div>
+                <div class="font-semibold text-sm text-white">${currentUser.name}</div>
+                <div class="text-xs text-orange-400 uppercase font-bold">${currentUser.role}</div>
+              </div>
+              <button onclick="logout()" class="w-full py-2.5 rounded-xl bg-red-600/20 hover:bg-red-600/30 text-red-400 font-semibold text-sm transition">
+                Cerrar Sesión
+              </button>
+            </div>
+          </aside>
+
+          <main class="flex-1 flex flex-col min-w-0">
+            <header class="md:hidden bg-slate-900 border-b border-slate-800 px-4 py-3 flex items-center justify-between sticky top-0 z-30">
+              <div class="flex items-center gap-2">
+                <span class="px-2 py-1 rounded-lg bg-orange-600 font-black text-xs">SN</span>
+                <div>
+                  <div class="font-bold text-sm leading-none">${currentUser.name}</div>
+                  <div class="text-[11px] ${state.shiftActive ? "text-emerald-400" : "text-red-400"}">
+                    ${state.shiftActive ? "● Turno Activo" : "● Turno Cortado"} · ${currentUser.role.toUpperCase()}
+                  </div>
+                </div>
+              </div>
+              <button onclick="logout()" class="px-3 py-1.5 rounded-lg bg-slate-800 text-xs text-red-400 font-semibold">Salir</button>
+            </header>
+
+            <div class="p-4 md:p-6 flex-1 max-w-7xl w-full mx-auto">
+              ${activeTab === "mesas" ? renderTablesAndOrderView() : ""}
+              ${activeTab === "cocina" ? renderKitchenView() : ""}
+              ${activeTab === "caja" ? renderCashierView() : ""}
+              ${activeTab === "historial" ? renderHistoryView() : ""}
+              ${activeTab === "admin" ? renderAdminView() : ""}
+            </div>
+          </main>
+
+          <nav class="md:hidden fixed bottom-0 inset-x-0 bg-slate-900 border-t border-slate-800 flex justify-around py-2 px-1 z-40">
+            ${renderNavButtons(activeKitchenCount, true)}
+          </nav>
+        </div>
+
+        ${checkoutModal ? renderCheckoutModal() : ""}
+      `;
+    }
+
+    function renderNavButtons(kitchenCount, isMobile) {
+      const items = [
+        { id: "mesas", label: "Salón / Pedidos", icon: "🍽️", roles: ["admin", "mesero", "caja"] },
+        { id: "cocina", label: "Cocina", icon: "🔥", badge: kitchenCount, roles: ["admin", "cocina", "mesero"] },
+        { id: "caja", label: "Caja / Cobros", icon: "💵", roles: ["admin", "caja"] },
+        { id: "historial", label: "Historial", icon: "📜", roles: ["admin", "caja", "mesero"] },
+        { id: "admin", label: "Admin / Turno", icon: "⚙️", roles: ["admin"] }
+      ].filter(i => i.roles.includes(currentUser.role));
+
+      return items.map(item => {
+        const active = activeTab === item.id;
+        if (isMobile) {
+          return `
+            <button onclick="activeTab='${item.id}'; render();" class="relative flex flex-col items-center justify-center px-2 py-1 rounded-xl ${active ? "text-orange-400 bg-orange-500/10" : "text-slate-400"}">
+              <span class="text-lg leading-none">${item.icon}</span>
+              <span class="text-[11px] font-medium mt-1">${item.label.split(" ")[0]}</span>
+              ${item.badge ? `<span class="absolute top-0 right-1 bg-red-600 text-white text-[10px] font-bold px-1.5 rounded-full">${item.badge}</span>` : ""}
+            </button>
+          `;
+        }
+        return `
+          <button onclick="activeTab='${item.id}'; render();" class="w-full flex items-center justify-between px-3.5 py-3 rounded-xl text-sm font-semibold transition ${active ? "bg-orange-600 text-white" : "text-slate-300 hover:bg-slate-800"}">
+            <span class="flex items-center gap-2.5"><span>${item.icon}</span> ${item.label}</span>
+            ${item.badge ? `<span class="bg-red-600 text-white text-xs px-2 py-0.5 rounded-full">${item.badge}</span>` : ""}
+          </button>
+        `;
+      }).join("");
+    }
+
+    function renderLoginScreen() {
+      return `
+        <div class="min-h-screen flex items-center justify-center p-4 bg-slate-950">
+          <div class="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl">
+            <div class="text-center mb-5">
+              <div class="w-14 h-14 mx-auto rounded-2xl bg-orange-600 flex items-center justify-center text-xl font-black text-white mb-3">SN</div>
+              <h1 class="text-xl font-bold text-white">${state.businessName}</h1>
+              <div class="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold ${state.shiftActive ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30" : "bg-red-500/15 text-red-400 border border-red-500/30"}">
+                ${state.shiftActive ? "● JORNADA LABORAL ABIERTA" : "● JORNADA CERRADA (SOLO ADMINISTRADOR)"}
+              </div>
+            </div>
+
+            <div class="bg-slate-950 border border-slate-800 rounded-2xl p-4 text-center mb-4">
+              <div class="text-xs text-slate-400 mb-2">Ingresa tu PIN de 4 dígitos</div>
+              <div class="flex justify-center gap-3">
+                ${[0,1,2,3].map(i => `
+                  <div class="w-11 h-12 rounded-xl border ${pinBuffer[i] ? "border-orange-500 bg-orange-500/20 text-white" : "border-slate-800 bg-slate-900 text-slate-600"} flex items-center justify-center text-xl font-bold">
+                    ${pinBuffer[i] ? "●" : ""}
+                  </div>
+                `).join("")}
+              </div>
+              ${loginError ? `<div class="mt-3 text-xs text-red-400 font-semibold">${loginError}</div>` : ""}
+            </div>
+
+            <div class="grid grid-cols-3 gap-2.5 mb-5">
+              ${[1,2,3,4,5,6,7,8,9].map(n => `
+                <button onclick="handlePinDigit('${n}')" class="py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-xl font-bold text-white transition">${n}</button>
+              `).join("")}
+              <button onclick="pinBuffer=''; loginError=''; render();" class="py-3.5 rounded-2xl bg-slate-800/50 text-xs font-bold text-slate-400">LIMPIAR</button>
+              <button onclick="handlePinDigit('0')" class="py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-xl font-bold text-white">0</button>
+              <button onclick="pinBuffer=pinBuffer.slice(0,-1); render();" class="py-3.5 rounded-2xl bg-slate-800/50 text-sm font-bold text-orange-400">⌫</button>
+            </div>
+
+            <div class="border-t border-slate-800 pt-4">
+              <div class="text-[11px] text-slate-400 uppercase font-bold mb-2 text-center">Personal Registrado (Acceso Rápido)</div>
+              <div class="flex flex-wrap gap-1.5 justify-center">
+                ${state.users.map(u => `
+                  <button onclick="attemptLogin('${u.pin}')" class="px-2.5 py-1.5 rounded-lg text-xs font-medium border ${!u.active ? "border-red-900/50 bg-red-950/30 text-red-400 line-through" : "border-slate-700 bg-slate-800 hover:border-orange-500 text-slate-200"}">
+                    ${u.name} (${u.pin})
+                  </button>
+                `).join("")}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderTablesAndOrderView() {
+      const selectedOrder = selectedTableId ? state.activeOrders[selectedTableId] : null;
+      const categories = ["Todos", ...new Set(state.menu.map(p => p.category))];
+      const filteredMenu = state.menu.filter(p => {
+        const matchCat = menuCategoryFilter === "Todos" || p.category === menuCategoryFilter;
+        const matchSearch = p.name.toLowerCase().includes(menuSearchQuery.toLowerCase());
+        return matchCat && matchSearch;
+      });
+
+      const statusStyles = {
+        libre: "border-slate-800 bg-slate-900 hover:border-slate-600",
+        ocupada: "border-amber-500/60 bg-amber-500/10",
+        cocina: "border-blue-500/60 bg-blue-500/10",
+        listo: "border-emerald-500 bg-emerald-500/15 animate-pulse"
+      };
+      const statusLabels = {
+        libre: "Libre",
+        ocupada: "Ocupada",
+        cocina: "En Cocina",
+        listo: "¡Listo Servir!"
+      };
+
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <div class="${selectedOrder ? "lg:col-span-5" : "lg:col-span-12"} space-y-4">
+            <div class="flex items-center justify-between">
+              <h2 class="text-lg font-bold text-white">Mapa de Mesas — Sabor Norteñito</h2>
+              <span class="text-xs text-slate-400">Toca una mesa para tomar pedido</span>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-3 ${selectedOrder ? "lg:grid-cols-2" : "lg:grid-cols-4"} gap-3">
+              ${state.tables.map(t => {
+                const ord = state.activeOrders[t.id];
+                const total = ord ? ord.items.reduce((a, b) => a + b.price * b.qty, 0) : 0;
+                const isSelected = selectedTableId === t.id;
+                return `
+                  <button onclick="openTable('${t.id}')" class="p-4 rounded-2xl border-2 text-left transition ${statusStyles[t.status] || statusStyles.libre} ${isSelected ? "ring-2 ring-orange-500" : ""}">
+                    <div class="flex items-center justify-between">
+                      <span class="font-bold text-base text-white">${t.name}</span>
+                      <span class="text-[11px] font-bold px-2 py-0.5 rounded-full bg-slate-950/70 text-slate-200">${statusLabels[t.status] || "Libre"}</span>
+                    </div>
+                    <div class="text-xs text-slate-400 mt-1">${t.zone}</div>
+                    ${ord ? `<div class="mt-2 pt-2 border-t border-slate-700/60 flex justify-between items-center">
+                      <span class="text-xs text-slate-300">${ord.items.reduce((a,b)=>a+b.qty,0)} ítems</span>
+                      <span class="font-bold text-sm text-orange-400">S/ ${total.toFixed(2)}</span>
+                    </div>` : `<div class="mt-2 text-xs text-slate-500">Disponible</div>`}
+                  </button>
+                `;
+              }).join("")}
+            </div>
+          </div>
+
+          ${selectedOrder ? `
+            <div class="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+              <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div>
+                  <h3 class="font-bold text-lg text-white">${selectedOrder.tableName}</h3>
+                  <p class="text-xs text-slate-400">Atiende: ${selectedOrder.waiterName} · Inicio: ${selectedOrder.startedAt}</p>
+                </div>
+                <button onclick="selectedTableId=null; render();" class="px-3 py-1.5 rounded-xl bg-slate-800 text-xs font-semibold text-slate-300">Cerrar Vista</button>
+              </div>
+
+              <div class="space-y-2">
+                <input type="text" value="${menuSearchQuery}" oninput="menuSearchQuery=this.value; render();" placeholder="Buscar plato o bebida..." class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-orange-500" />
+                <div class="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
+                  ${categories.map(c => `
+                    <button onclick="menuCategoryFilter='${c}'; render();" class="px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap ${menuCategoryFilter === c ? "bg-orange-600 text-white" : "bg-slate-800 text-slate-300"}">${c}</button>
+                  `).join("")}
+                </div>
+              </div>
+
+              <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-56 overflow-y-auto pr-1">
+                ${filteredMenu.map(p => `
+                  <button onclick="addItemToOrder('${p.id}')" ${!p.available ? "disabled" : ""} class="p-3 rounded-xl border text-left transition ${p.available ? "bg-slate-950 border-slate-800 hover:border-orange-500 active:scale-95" : "bg-slate-950/40 border-slate-900 opacity-50 cursor-not-allowed"}">
+                    <div class="font-semibold text-xs text-white line-clamp-2">${p.name}</div>
+                    <div class="mt-1.5 flex items-center justify-between">
+                      <span class="text-xs font-bold text-orange-400">S/ ${p.price.toFixed(2)}</span>
+                      ${!p.available ? `<span class="text-[10px] text-red-400 font-bold">AGOTADO</span>` : `<span class="text-xs bg-slate-800 px-1.5 rounded">+</span>`}
+                    </div>
+                  </button>
+                `).join("")}
+              </div>
+
+              <div class="border-t border-slate-800 pt-3">
+                <div class="text-xs font-bold uppercase text-slate-400 mb-2">Detalle del Pedido</div>
+                ${selectedOrder.items.length === 0 ? `<div class="text-sm text-slate-500 py-4 text-center">Toca un producto arriba para agregarlo al pedido.</div>` : `
+                  <div class="space-y-2 max-h-52 overflow-y-auto">
+                    ${selectedOrder.items.map(item => `
+                      <div class="flex items-center justify-between bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                        <div class="min-w-0 pr-2">
+                          <div class="text-sm font-semibold text-white flex items-center gap-1.5">
+                            <span>${item.name}</span>
+                            ${item.sentToKitchen ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">En Cocina</span>` : `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400">Nuevo</span>`}
+                          </div>
+                          <div class="text-xs text-slate-400">S/ ${(item.price * item.qty).toFixed(2)} ${item.note ? `· <span class="text-orange-400">Nota: ${item.note}</span>` : ""}</div>
+                        </div>
+                        <div class="flex items-center gap-1.5 shrink-0">
+                          <button onclick="setItemNote('${item.uid}')" class="px-2 py-1 rounded-lg bg-slate-800 text-xs text-slate-300" title="Agregar nota">📝</button>
+                          <button onclick="changeItemQty('${item.uid}', -1)" class="w-7 h-7 rounded-lg bg-slate-800 font-bold text-white">-</button>
+                          <span class="w-6 text-center text-sm font-bold">${item.qty}</span>
+                          <button onclick="changeItemQty('${item.uid}', 1)" class="w-7 h-7 rounded-lg bg-slate-800 font-bold text-white">+</button>
+                        </div>
+                      </div>
+                    `).join("")}
+                  </div>
+                `}
+
+                <div class="mt-4 pt-3 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3">
+                  <div>
+                    <span class="text-xs text-slate-400">Total acumulado:</span>
+                    <div class="text-2xl font-black text-white">S/ ${selectedOrder.items.reduce((a,b)=>a+b.price*b.qty,0).toFixed(2)}</div>
+                  </div>
+                  <div class="flex gap-2 w-full sm:w-auto">
+                    <button onclick="sendOrderToKitchen()" class="flex-1 sm:flex-none px-4 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 font-bold text-sm text-white">
+                      🔥 Enviar a Cocina
+                    </button>
+                    ${(currentUser.role === "admin" || currentUser.role === "caja") && selectedOrder.items.length > 0 ? `
+                      <button onclick="openCheckout('${selectedOrder.tableId}')" class="flex-1 sm:flex-none px-4 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-bold text-sm text-white">
+                        💵 Cobrar Mesa
+                      </button>
+                    ` : ""}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ` : ""}
+        </div>
+      `;
+    }
+
+    function renderKitchenView() {
+      const activeTickets = state.kitchenTickets.filter(t => t.status !== "entregado");
+      return `
+        <div class="space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-xl font-bold text-white">Pantalla de Cocina en Tiempo Real (KDS)</h2>
+              <p class="text-xs text-slate-400">Los pedidos llegan automáticamente al ser enviados por los meseros</p>
+            </div>
+            <span class="px-3 py-1 rounded-full bg-orange-600/20 text-orange-400 text-xs font-bold">${activeTickets.length} Comandas Activas</span>
+          </div>
+
+          ${activeTickets.length === 0 ? `
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center text-slate-400">
+              No hay comandas pendientes en cocina en este momento.
+            </div>
+          ` : `
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              ${activeTickets.map(t => `
+                <div class="bg-slate-900 border-2 ${t.status === "listo" ? "border-emerald-500" : t.status === "preparando" ? "border-amber-500" : "border-red-500/70"} rounded-2xl p-4 flex flex-col justify-between">
+                  <div>
+                    <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+                      <div>
+                        <span class="font-black text-lg text-white">${t.tableName}</span>
+                        <span class="ml-2 text-xs text-slate-400">${t.id}</span>
+                      </div>
+                      <span class="text-xs font-bold px-2.5 py-1 rounded-full ${t.status === "listo" ? "bg-emerald-500/20 text-emerald-400" : t.status === "preparando" ? "bg-amber-500/20 text-amber-400" : "bg-red-500/20 text-red-400"}">
+                        ${t.status.toUpperCase()}
+                      </span>
+                    </div>
+                    <div class="text-xs text-slate-400 mt-1">Mesero: ${t.waiterName} · Hora: ${t.createdAt}</div>
+                    <ul class="mt-3 space-y-2">
+                      ${t.items.map(i => `
+                        <li class="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                          <div class="font-bold text-sm text-white">${i.qty}x ${i.name}</div>
+                          ${i.note ? `<div class="text-xs font-semibold text-orange-400 mt-0.5">⚠️ ${i.note}</div>` : ""}
+                        </li>
+                      `).join("")}
+                    </ul>
+                  </div>
+
+                  <div class="mt-4 pt-3 border-t border-slate-800 flex gap-2">
+                    ${t.status === "pendiente" ? `
+                      <button onclick="updateKitchenTicketStatus('${t.id}', 'preparando')" class="w-full py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 font-bold text-sm text-white">Empezar Preparación</button>
+                    ` : ""}
+                    ${t.status === "preparando" ? `
+                      <button onclick="updateKitchenTicketStatus('${t.id}', 'listo')" class="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-bold text-sm text-white">✅ Marcar Listo para Servir</button>
+                    ` : ""}
+                    ${t.status === "listo" ? `
+                      <button onclick="updateKitchenTicketStatus('${t.id}', 'entregado')" class="w-full py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 font-bold text-sm text-white">Confirmar Entregado</button>
+                    ` : ""}
+                  </div>
+                </div>
+              `).join("")}
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    function renderCashierView() {
+      const openTables = Object.values(state.activeOrders);
+      const validSales = state.salesHistory.filter(s => s.status === "pagado");
+      const byMethod = (m) => validSales.filter(s => s.method === m).reduce((a, b) => a + b.total, 0);
+      const totalExp = state.cashRegister.expenses.reduce((a, b) => a + b.amount, 0);
+
+      return `
+        <div class="space-y-6">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 class="text-xl font-bold text-white">Caja y Cobros — Sabor Norteñito</h2>
+              <p class="text-xs text-slate-400">Apertura base: S/ ${state.cashRegister.openingCash.toFixed(2)} · Gastos: S/ ${totalExp.toFixed(2)}</p>
+            </div>
+            <div class="flex gap-2">
+              <button onclick="addCashExpense()" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-amber-400">+ Gasto Caja Chica</button>
+              <button onclick="closeCashShift()" class="px-3.5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-xs font-bold text-white">Arqueo / Cerrar Caja</button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="bg-purple-950/40 border border-purple-700/40 rounded-2xl p-4">
+              <div class="text-xs font-bold text-purple-300">YAPE</div>
+              <div class="text-2xl font-black text-white mt-1">S/ ${byMethod("Yape").toFixed(2)}</div>
+            </div>
+            <div class="bg-cyan-950/40 border border-cyan-700/40 rounded-2xl p-4">
+              <div class="text-xs font-bold text-cyan-300">PLIN</div>
+              <div class="text-2xl font-black text-white mt-1">S/ ${byMethod("Plin").toFixed(2)}</div>
+            </div>
+            <div class="bg-emerald-950/40 border border-emerald-700/40 rounded-2xl p-4">
+              <div class="text-xs font-bold text-emerald-300">EFECTIVO</div>
+              <div class="text-2xl font-black text-white mt-1">S/ ${byMethod("Efectivo").toFixed(2)}</div>
+            </div>
+            <div class="bg-blue-950/40 border border-blue-700/40 rounded-2xl p-4">
+              <div class="text-xs font-bold text-blue-300">TARJETA</div>
+              <div class="text-2xl font-black text-white mt-1">S/ ${byMethod("Tarjeta").toFixed(2)}</div>
+            </div>
+          </div>
+
+          <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+            <h3 class="font-bold text-base text-white mb-3">Cuentas Abiertas por Cobrar (${openTables.length})</h3>
+            ${openTables.length === 0 ? `<div class="text-sm text-slate-500 py-4">No hay mesas abiertas pendientes de cobro.</div>` : `
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                ${openTables.map(o => {
+                  const tot = o.items.reduce((a, b) => a + b.price * b.qty, 0);
+                  return `
+                    <div class="bg-slate-950 border border-slate-800 rounded-xl p-3.5 flex items-center justify-between">
+                      <div>
+                        <div class="font-bold text-white">${o.tableName}</div>
+                        <div class="text-xs text-slate-400">Mesero: ${o.waiterName} · ${o.items.length} ítems</div>
+                        <div class="text-lg font-black text-orange-400 mt-1">S/ ${tot.toFixed(2)}</div>
+                      </div>
+                      <button onclick="openCheckout('${o.tableId}')" class="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-bold text-xs text-white">Cobrar</button>
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+            `}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderCheckoutModal() {
+      const order = state.activeOrders[checkoutModal.tableId];
+      if (!order) return "";
+      const subtotal = order.items.reduce((a, b) => a + b.price * b.qty, 0);
+      const total = Math.max(0, subtotal - (Number(checkoutModal.discount) || 0));
+      const change = checkoutModal.method === "Efectivo" ? Math.max(0, (Number(checkoutModal.receivedCash) || 0) - total) : 0;
+
+      return `
+        <div class="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+          <div class="bg-slate-900 border border-slate-700 rounded-3xl w-full max-w-md p-5 space-y-4">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 class="font-bold text-lg text-white">Cobrar ${order.tableName}</h3>
+              <button onclick="checkoutModal=null; render();" class="text-slate-400 hover:text-white text-xl">✕</button>
+            </div>
+
+            <div class="bg-slate-950 p-3.5 rounded-2xl border border-slate-800 flex justify-between items-center">
+              <span class="text-sm text-slate-400">Total a Pagar:</span>
+              <span class="text-2xl font-black text-emerald-400">S/ ${total.toFixed(2)}</span>
+            </div>
+
+            <div>
+              <label class="text-xs font-bold text-slate-400 uppercase block mb-2">Método de Pago</label>
+              <div class="grid grid-cols-2 gap-2">
+                ${["Yape", "Plin", "Efectivo", "Tarjeta"].map(m => `
+                  <button onclick="checkoutModal.method='${m}'; render();" class="py-2.5 rounded-xl font-bold text-sm border ${checkoutModal.method === m ? "bg-orange-600 border-orange-500 text-white" : "bg-slate-950 border-slate-800 text-slate-300"}">${m}</button>
+                `).join("")}
+              </div>
+            </div>
+
+            ${(checkoutModal.method === "Yape" || checkoutModal.method === "Plin") ? `
+              <div class="bg-purple-950/30 border border-purple-700/40 p-3 rounded-xl space-y-2">
+                <div class="text-xs text-purple-200">Número ${checkoutModal.method}: <strong>${checkoutModal.method === "Yape" ? state.yapeNumber : state.plinNumber}</strong></div>
+                <input type="text" value="${checkoutModal.opCode}" oninput="checkoutModal.opCode=this.value" placeholder="N° de operación o nombre (opcional)" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-sm text-white" />
+              </div>
+            ` : ""}
+
+            ${checkoutModal.method === "Efectivo" ? `
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="text-xs text-slate-400 block mb-1">Monto Recibido (S/)</label>
+                  <input type="number" step="0.10" value="${checkoutModal.receivedCash}" oninput="checkoutModal.receivedCash=this.value; render();" class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-bold" />
+                </div>
+                <div class="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                  <div class="text-xs text-slate-400">Vuelto</div>
+                  <div class="text-lg font-black text-amber-400">S/ ${change.toFixed(2)}</div>
+                </div>
+              </div>
+            ` : ""}
+
+            <button onclick="processPayment()" class="w-full py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-500 font-black text-white text-sm">
+              Confirmar Pago e Imprimir Ticket
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderHistoryView() {
+      return `
+        <div class="space-y-6">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 class="text-xl font-bold text-white">Historial Activo — Sabor Norteñito</h2>
+              <p class="text-xs text-slate-400">Registro en vivo de boletas, comandas de cocina, cierres y auditoría de personal</p>
+            </div>
+            <button onclick="exportSalesCSV()" class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white">📊 Exportar Ventas CSV</button>
+          </div>
+
+          <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+            <h3 class="font-bold text-base text-white mb-3">Ventas y Boletas (${state.salesHistory.length})</h3>
+            ${state.salesHistory.length === 0 ? `<div class="text-sm text-slate-500 py-4">Aún no se han cobrado pedidos.</div>` : `
+              <div class="overflow-x-auto">
+                <table class="w-full text-left text-xs">
+                  <thead class="text-slate-400 border-b border-slate-800">
+                    <tr>
+                      <th class="py-2 pr-3">Boleta</th>
+                      <th class="py-2 pr-3">Fecha / Hora</th>
+                      <th class="py-2 pr-3">Mesa / Mesero</th>
+                      <th class="py-2 pr-3">Método</th>
+                      <th class="py-2 pr-3">Total</th>
+                      <th class="py-2">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-800/70">
+                    ${state.salesHistory.map(s => `
+                      <tr class="${s.status === "anulado" ? "opacity-50" : ""}">
+                        <td class="py-2.5 pr-3 font-bold text-white">${s.id}</td>
+                        <td class="py-2.5 pr-3 text-slate-300">${s.date} ${s.time}</td>
+                        <td class="py-2.5 pr-3 text-slate-300">${s.tableName} (${s.waiterName})</td>
+                        <td class="py-2.5 pr-3"><span class="px-2 py-0.5 rounded bg-slate-800 font-semibold">${s.method}</span></td>
+                        <td class="py-2.5 pr-3 font-bold ${s.status === "anulado" ? "text-red-400 line-through" : "text-emerald-400"}">S/ ${s.total.toFixed(2)}</td>
+                        <td class="py-2.5 flex gap-1.5">
+                          <button onclick="printSaleTicket('${s.id}')" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-white">🖨️</button>
+                          ${currentUser.role === "admin" && s.status === "pagado" ? `<button onclick="voidSale('${s.id}')" class="px-2 py-1 rounded bg-red-950 text-red-400">Anular</button>` : ""}
+                        </td>
+                      </tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              </div>
+            `}
+          </div>
+
+          <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+            <h3 class="font-bold text-base text-white mb-3">Bitácora de Movimientos en Tiempo Real (${state.auditLogs.length})</h3>
+            <div class="space-y-1.5 max-h-64 overflow-y-auto text-xs">
+              ${state.auditLogs.map(l => `
+                <div class="flex items-start justify-between bg-slate-950 px-3 py-2 rounded-lg border border-slate-800/70">
+                  <div><strong class="text-orange-400">${l.user}:</strong> <span class="text-slate-200">${l.action}</span></div>
+                  <span class="text-slate-500 shrink-0 ml-2">${l.date} ${l.time}</span>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderAdminView() {
+      const validSales = state.salesHistory.filter(s => s.status === "pagado");
+      const totalRevenue = validSales.reduce((a, b) => a + b.total, 0);
+
+      return `
+        <div class="space-y-6">
+          <div class="p-5 rounded-2xl border-2 ${state.shiftActive ? "bg-emerald-950/20 border-emerald-600/50" : "bg-red-950/30 border-red-600"} flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="text-lg font-black text-white">Control de Jornada Laboral — Sabor Norteñito</span>
+                <span class="px-2.5 py-0.5 rounded-full text-xs font-bold ${state.shiftActive ? "bg-emerald-500 text-slate-950" : "bg-red-600 text-white"}">
+                  ${state.shiftActive ? "TURNO ABIERTO" : "ACCESO CORTADO"}
+                </span>
+              </div>
+              <p class="text-xs text-slate-300 mt-1">
+                ${state.shiftActive
+                  ? "El personal activo puede ingresar desde sus celulares o PC. Al terminar el día, corta el acceso aquí."
+                  : "El portal está bloqueado para meseros, cocina y caja hasta que vuelvas a activar la jornada."}
+              </p>
+              <p class="text-[11px] text-slate-400 mt-1">Último cambio: ${state.shiftLastChanged}</p>
+            </div>
+            <button onclick="toggleWorkShift()" class="w-full sm:w-auto px-5 py-3.5 rounded-2xl font-black text-sm text-white shadow-lg transition ${state.shiftActive ? "bg-red-600 hover:bg-red-500" : "bg-emerald-600 hover:bg-emerald-500"}">
+              ${state.shiftActive ? "🔒 Cortar Acceso (Fin de Jornada)" : "🔓 Activar Jornada Laboral"}
+            </button>
+          </div>
+
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <div class="text-xs text-slate-400">Ingresos Totales</div>
+              <div class="text-2xl font-black text-emerald-400 mt-1">S/ ${totalRevenue.toFixed(2)}</div>
+            </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <div class="text-xs text-slate-400">Boletas Cobradas</div>
+              <div class="text-2xl font-black text-white mt-1">${validSales.length}</div>
+            </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <div class="text-xs text-slate-400">Mesas Activas</div>
+              <div class="text-2xl font-black text-orange-400 mt-1">${Object.keys(state.activeOrders).length} / ${state.tables.length}</div>
+            </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <div class="text-xs text-slate-400">Personal Activo</div>
+              <div class="text-2xl font-black text-blue-400 mt-1">${state.users.filter(u => u.active).length}</div>
+            </div>
+          </div>
+
+          <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 class="font-bold text-base text-white">Sincronización en la Nube entre Celulares y PC</h3>
+                <p class="text-xs text-slate-400">Conecta tu proyecto gratuito de Supabase para que lo que anota una mesera en su celular caiga al instante en cocina y caja</p>
+              </div>
+              <span class="text-xs px-2.5 py-1 rounded-full font-bold ${state.cloudConfig.enabled ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-800 text-slate-400"}">
+                ${state.cloudConfig.enabled ? "Nube Activa" : "Modo Local"}
+              </span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+              <input id="sb-url-input" type="text" value="${state.cloudConfig.url}" placeholder="Supabase Project URL (https://xxx.supabase.co)" class="px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white" />
+              <input id="sb-key-input" type="password" value="${state.cloudConfig.anonKey}" placeholder="Supabase Anon Public Key" class="px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white" />
+              <input id="sb-room-input" type="text" value="${state.cloudConfig.roomId}" placeholder="Código de local (ej. sabor-nortenito-principal)" class="px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white" />
+            </div>
+            <div class="flex flex-wrap items-center justify-between gap-3 pt-1">
+              <label class="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                <input id="sb-enabled-input" type="checkbox" ${state.cloudConfig.enabled ? "checked" : ""} class="rounded accent-orange-500" />
+                <span>Activar sincronización en tiempo real entre todos los dispositivos</span>
+              </label>
+              <button onclick="saveCloudConfigFromUI()" class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white">Guardar y Sincronizar</button>
+            </div>
+          </div>
+
+          <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+            <div class="flex items-center justify-between">
+              <div>
+                <h3 class="font-bold text-base text-white">Control de Trabajadores y Accesos</h3>
+                <p class="text-xs text-slate-400">Si una trabajadora renuncia, usa "Eliminar" para revocar su acceso definitivamente</p>
+              </div>
+              <button onclick="addStaffMember()" class="px-3.5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-xs font-bold text-white">+ Nuevo Trabajador</button>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              ${state.users.map(u => `
+                <div class="bg-slate-950 border ${u.active ? "border-slate-800" : "border-red-900/60"} rounded-xl p-3 flex items-center justify-between gap-2">
+                  <div>
+                    <div class="font-bold text-sm text-white flex items-center gap-2">
+                      <span>${u.name}</span>
+                      <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 uppercase text-orange-400">${u.role}</span>
+                    </div>
+                    <div class="text-xs text-slate-400 mt-0.5">PIN: <strong>${u.pin}</strong> · Estado: <span class="${u.active ? "text-emerald-400" : "text-red-400"}">${u.active ? "Activo" : "Suspendido"}</span></div>
+                  </div>
+                  ${u.id !== currentUser.id ? `
+                    <div class="flex gap-1.5 shrink-0">
+                      <button onclick="toggleStaffActive('${u.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-semibold ${u.active ? "bg-amber-500/20 text-amber-300" : "bg-emerald-500/20 text-emerald-300"}">
+                        ${u.active ? "Pausar" : "Activar"}
+                      </button>
+                      <button onclick="deleteStaffMember('${u.id}')" class="px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white text-xs font-bold transition">
+                        Eliminar
+                      </button>
+                    </div>
+                  ` : `<span class="text-[11px] text-slate-500">Tu cuenta</span>`}
+                </div>
+              `).join("")}
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+              <div class="flex items-center justify-between">
+                <h3 class="font-bold text-base text-white">Carta / Platos (${state.menu.length})</h3>
+                <button onclick="addMenuProduct()" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-orange-400">+ Agregar Plato</button>
+              </div>
+              <div class="space-y-1.5 max-h-60 overflow-y-auto">
+                ${state.menu.map(p => `
+                  <div class="flex items-center justify-between bg-slate-950 px-3 py-2 rounded-xl border border-slate-800 text-xs">
+                    <div>
+                      <div class="font-semibold text-white">${p.name}</div>
+                      <div class="text-slate-400">${p.category} · S/ ${p.price.toFixed(2)}</div>
+                    </div>
+                    <button onclick="toggleProductStock('${p.id}')" class="px-2.5 py-1 rounded-lg font-bold ${p.available ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}">
+                      ${p.available ? "Disponible" : "Agotado"}
+                    </button>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+              <div class="flex items-center justify-between">
+                <h3 class="font-bold text-base text-white">Mesas y Respaldo</h3>
+                <div class="flex gap-2">
+                  <button onclick="addNewTable()" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-orange-400">+ Mesa</button>
+                  <button onclick="exportBackupJSON()" class="px-3 py-1.5 rounded-xl bg-blue-600/20 text-blue-400 text-xs font-bold">💾 Respaldo JSON</button>
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-2 max-h-60 overflow-y-auto">
+                ${state.tables.map(t => `
+                  <div class="bg-slate-950 px-3 py-2 rounded-xl border border-slate-800 text-xs flex justify-between items-center">
+                    <span class="font-semibold text-white">${t.name}</span>
+                    <span class="text-slate-400">${t.zone}</span>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    if (state.cloudConfig && state.cloudConfig.enabled) {
+      connectSupabaseRealtime();
+    }
+    render();
+  </script>
+</body>
+</html>

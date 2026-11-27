@@ -1,0 +1,24 @@
+SABOR NORTEÑITO POS v3.0 — GUÍA COMPLETA DE INSTALACIÓN Y USO
+
+1. ARCHIVO WEB / PWA PRINCIPAL:
+   - 'index.html' contiene todo el sistema personalizado para Sabor Norteñito: Salón/Mesas, Toma de Pedidos,
+     Cocina KDS en vivo, Caja (Yape, Plin, Efectivo, Tarjeta), Historial completo con exportación CSV/JSON y
+     Panel de Administrador con Corte de Jornada y Eliminación inmediata de trabajadoras.
+
+2. SINCRONIZACIÓN ENTRE CELULARES Y PC (SUPABASE):
+   - Crea un proyecto gratis en https://supabase.com
+   - Ejecuta el script 'supabase_realtime.sql' en el SQL Editor.
+   - Entra como Administrador (PIN 1111) -> pestaña 'Admin / Turno' -> pega Project URL y Anon Key,
+     marca la casilla de sincronización en la nube y haz clic en 'Guardar y Sincronizar'.
+
+3. GENERAR EL ARCHIVO .APK PARA CELULARES ANDROID:
+   - Método rápido (sin instalar Android Studio):
+     Sube 'index.html' a GitHub Pages o Vercel, copia tu enlace https://... y pégalo en
+     https://www.pwabuilder.com -> Package for stores -> Android -> Generate Package para descargar el .APK.
+   - Proyecto base Android Studio:
+     Incluido en la carpeta 'android-apk-project/' (copia 'index.html' dentro de 'app/src/main/assets/index.html'
+     y compila Build -> Build Bundle(s) / APK(s) -> Build APK(s)).
+
+4. IMPRESORA TÉRMICA POS-D TP-180 (80mm USB):
+   - Conéctala por USB a la PC o laptop de caja/cocina, instala el driver ESC/POS de 80mm
+     y selecciona la impresora al emitir tickets o boletas.
